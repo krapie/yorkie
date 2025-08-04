@@ -5,6 +5,6 @@ To hydrate the manifests in this repository, run the following commands:
 ```shell
 git clone https://github.com/krapie/yorkie.git
 # cd into the cloned directory
-git checkout f74fe111b980575786fe2d900806d950ec6c1512
+git checkout 51882c1d3b613378043e9791631799fc6ba36160
 helm template . --name-template yorkie-app --include-crds
 ```
