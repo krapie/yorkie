@@ -1,55 +1,25 @@
 apiVersion: v1
-kind: ServiceAccount
+kind: Service
 metadata:
   annotations:
-    argocd.argoproj.io/tracking-id: yorkie-app:/ServiceAccount:yorkie/yorkie-db-provisioning-job-account
-  name: yorkie-db-provisioning-job-account
-  namespace: yorkie
----
-apiVersion: v1
-data:
-  setup.sh: "#!/bin/bash\n\nfunction waitUntilReady {\n  while true; do\n    mongosh $1 --quiet --eval \"db.runCommand('ping').ok\"\n    if [ $? -eq 0 ]; then\n        break\n    fi    \n    sleep 5\n  done       \n}\n\n\necho \"Wait until config server is ready...\"\nconfigsvrAddr=\"mongodb-configsvr-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\necho \"Config server address: ${configsvrAddr}\"\nwaitUntilReady $configsvrAddr\necho \"Configure config server\"\nmongosh $configsvrAddr --eval 'rs.initiate({\"_id\":\"mongodb-configsvr\", \"members\":[\n  {\"_id\":0,\"host\":\"mongodb-configsvr-0.mongodb-headless.mongodb.svc.cluster.local:27017\",\"priority\":5 }\n]})'\n\n\n\necho \"Wait until shard0 is ready...\"\nshardsvrAddr=\"mongodb-shard0-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\necho \"Shard0 address: mongodb-shard0-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\nwaitUntilReady $shardsvrAddr\necho \"Configure shard0\"\nmongosh $shardsvrAddr --eval 'rs.initiate({\"_id\":\"mongodb-shard-0\", \"members\":[\n  {\"_id\":0,\"host\":\"mongodb-shard0-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\",\"priority\":5 }\n]})'\n\n\necho \"Wait until shard1 is ready...\"\nshardsvrAddr=\"mongodb-shard1-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\necho \"Shard1 address: mongodb-shard1-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\nwaitUntilReady $shardsvrAddr\necho \"Configure shard1\"\nmongosh $shardsvrAddr --eval 'rs.initiate({\"_id\":\"mongodb-shard-1\", \"members\":[\n  {\"_id\":0,\"host\":\"mongodb-shard1-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\",\"priority\":5 }\n]})'\n\n\n\necho \"Wait until mongos is ready...\"\nmongosAddr=\"mongodb-mongos-0.mongodb.mongodb.svc.cluster.local:27017\"\necho \"Mongos address: ${mongosAddr}\"\nwaitUntilReady $mongosAddr\necho \"Configure mongos\"\nmongosh $mongosAddr --eval <<EOF\n  sh.addShard(\"mongodb-shard-0/mongodb-shard0-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\");\n  sh.addShard(\"mongodb-shard-1/mongodb-shard1-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\");\n  sh.enableSharding(\"yorkie-meta\");\n  sh.shardCollection(\n    \"yorkie-meta.clients\", \n    {\n        project_id: 1,\n    }, \n    false\n  );\n  sh.shardCollection(\n    \"yorkie-meta.documents\", \n    {\n        project_id: 1,\n    }, \n    false\n  );\n  sh.shardCollection(\n    \"yorkie-meta.changes\", \n    {\n        doc_id: \"hashed\",\n    }, \n    false\n  );\n  sh.shardCollection(\n    \"yorkie-meta.snapshots\", \n    {\n        doc_id: \"hashed\",\n    }, \n    false\n  );\n  sh.shardCollection(\n    \"yorkie-meta.versionvectors\", \n    {\n        doc_id: \"hashed\",\n    }, \n    false\n  );\nEOF\n"
-kind: ConfigMap
-metadata:
-  annotations:
-    argocd.argoproj.io/tracking-id: yorkie-app:/ConfigMap:mongodb/mongodb-setup-script
+    argocd.argoproj.io/tracking-id: yorkie-app:/Service:mongodb/mongodb
   labels:
-    app.kubernetes.io/component: mongodb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/instance: mongodb
+    app.kubernetes.io/managed-by: kubernetes
+    app.kubernetes.io/name: mongodb
     app.kubernetes.io/part-of: yorkie
-  name: mongodb-setup-script
+  name: mongodb
   namespace: mongodb
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  annotations:
-    argocd.argoproj.io/tracking-id: yorkie-app:rbac.authorization.k8s.io/Role:mongodb/db-provisioning-job-status-reader
-  name: db-provisioning-job-status-reader
-  namespace: mongodb
-rules:
-  - apiGroups:
-      - batch
-    resources:
-      - jobs
-    verbs:
-      - get
-      - list
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  annotations:
-    argocd.argoproj.io/tracking-id: yorkie-app:rbac.authorization.k8s.io/RoleBinding:mongodb/read-db-provisioning-status
-  name: read-db-provisioning-status
-  namespace: mongodb
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: db-provisioning-job-status-reader
-subjects:
-  - kind: ServiceAccount
-    name: yorkie-db-provisioning-job-account
-    namespace: yorkie
+spec:
+  ports:
+    - appProtocol: tcp
+      name: mongodb
+      port: 27017
+      targetPort: 27017
+  selector:
+    app.kubernetes.io/instance: mongodb
+  type: ClusterIP
 ---
 apiVersion: v1
 kind: Service
@@ -143,36 +113,52 @@ spec:
             - containerPort: 8080
             - containerPort: 8081
           resources: {}
-      initContainers:
-        - command:
-            - /bin/sh
-            - -c
-            - |
-              echo "Wait db start"
-              while true; do
-                job_status=$(kubectl get job -n $NAMESPACE $JOB_NAME -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}')
-                if [ "$job_status" = "True" ]; then
-                  echo "DB provisioning Job completed successfully!"
-                  break
-                fi
-                echo "Waiting for DB provisioning job to complete..."
-                sleep 5
-              done
-          env:
-            - name: NAMESPACE
-              value: mongodb
-            - name: JOB_NAME
-              value: mongodb-setup-job
-          image: bitnami/kubectl:latest
-          name: wait-for-sharded-db-provision
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:apps/StatefulSet:mongodb/mongodb
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/instance: mongodb
+    app.kubernetes.io/managed-by: kubernetes
+    app.kubernetes.io/name: mongodb
+    app.kubernetes.io/part-of: yorkie
+  name: mongodb
+  namespace: mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: mongodb
+  serviceName: mongodb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: mongodb
+    spec:
+      containers:
+        - image: docker.io/mongo:6.0
+          name: mongodb
+          ports:
+            - containerPort: 27017
+          resources: {}
           volumeMounts:
-            - mountPath: /root/.kube
-              name: kubeconfig
-              subPath: config
-      serviceAccountName: yorkie-db-provisioning-job-account
-      volumes:
-        - emptyDir: {}
-          name: kubeconfig
+            - mountPath: /data/db
+              name: mongodb-storage
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 60
+  volumeClaimTemplates:
+    - metadata:
+        name: mongodb-storage
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 1Gi
+        storageClassName: standard
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -344,34 +330,3 @@ spec:
             host: yorkie
             port:
               number: 8080
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  annotations:
-    argocd.argoproj.io/tracking-id: yorkie-app:batch/Job:mongodb/mongodb-setup-job
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation
-  labels:
-    app.kubernetes.io/component: mongodb
-    app.kubernetes.io/part-of: yorkie
-  name: mongodb-setup-job
-  namespace: mongodb
-spec:
-  backoffLimit: 0
-  template:
-    spec:
-      containers:
-        - command:
-            - /bin/bash
-            - /etc/config/setup.sh
-          image: docker.io/mongo:6.0
-          name: setup
-          volumeMounts:
-            - mountPath: /etc/config
-              name: setup-script
-      restartPolicy: Never
-      volumes:
-        - configMap:
-            name: mongodb-setup-script
-          name: setup-script

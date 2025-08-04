@@ -1,6 +1,6 @@
 {
   "repoURL": "https://github.com/krapie/yorkie.git",
-  "drySha": "2a3a1578a0ee3dbb8ed0a2f5668fed5b98513ffc",
+  "drySha": "f74fe111b980575786fe2d900806d950ec6c1512",
   "commands": [
     "helm template . --name-template yorkie-app --include-crds"
   ]
