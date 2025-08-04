@@ -5,7 +5,7 @@ yorkie:
 
   autoscaling:
     enabled: false
-    replicaCount: 3
+    replicaCount: 4
 
   image:
     repository: yorkieteam/yorkie
