@@ -1,0 +1,8 @@
+{
+  "repoURL": "https://github.com/krapie/yorkie.git",
+  "drySha": "2a3a1578a0ee3dbb8ed0a2f5668fed5b98513ffc",
+  "author": "JiHwan Yim <raararaara@gmail.com>",
+  "date": "2025-08-04T19:07:54+09:00",
+  "subject": "Use MongoDB time for lease expiration to avoid clock skew (#1426)",
+  "body": "This commit eliminates the use of local system clocks during leadership\nAcquire and Renew operations. Instead of calculating `expired_at` on\nthe server, server now only provides a `lease_duration`, and use\nMongoDB time to determine expiration.\n"
+}

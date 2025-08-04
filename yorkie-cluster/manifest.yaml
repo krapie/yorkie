@@ -1,0 +1,377 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:/ServiceAccount:yorkie/yorkie-db-provisioning-job-account
+  name: yorkie-db-provisioning-job-account
+  namespace: yorkie
+---
+apiVersion: v1
+data:
+  setup.sh: "#!/bin/bash\n\nfunction waitUntilReady {\n  while true; do\n    mongosh $1 --quiet --eval \"db.runCommand('ping').ok\"\n    if [ $? -eq 0 ]; then\n        break\n    fi    \n    sleep 5\n  done       \n}\n\n\necho \"Wait until config server is ready...\"\nconfigsvrAddr=\"mongodb-configsvr-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\necho \"Config server address: ${configsvrAddr}\"\nwaitUntilReady $configsvrAddr\necho \"Configure config server\"\nmongosh $configsvrAddr --eval 'rs.initiate({\"_id\":\"mongodb-configsvr\", \"members\":[\n  {\"_id\":0,\"host\":\"mongodb-configsvr-0.mongodb-headless.mongodb.svc.cluster.local:27017\",\"priority\":5 }\n]})'\n\n\n\necho \"Wait until shard0 is ready...\"\nshardsvrAddr=\"mongodb-shard0-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\necho \"Shard0 address: mongodb-shard0-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\nwaitUntilReady $shardsvrAddr\necho \"Configure shard0\"\nmongosh $shardsvrAddr --eval 'rs.initiate({\"_id\":\"mongodb-shard-0\", \"members\":[\n  {\"_id\":0,\"host\":\"mongodb-shard0-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\",\"priority\":5 }\n]})'\n\n\necho \"Wait until shard1 is ready...\"\nshardsvrAddr=\"mongodb-shard1-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\necho \"Shard1 address: mongodb-shard1-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\"\nwaitUntilReady $shardsvrAddr\necho \"Configure shard1\"\nmongosh $shardsvrAddr --eval 'rs.initiate({\"_id\":\"mongodb-shard-1\", \"members\":[\n  {\"_id\":0,\"host\":\"mongodb-shard1-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\",\"priority\":5 }\n]})'\n\n\n\necho \"Wait until mongos is ready...\"\nmongosAddr=\"mongodb-mongos-0.mongodb.mongodb.svc.cluster.local:27017\"\necho \"Mongos address: ${mongosAddr}\"\nwaitUntilReady $mongosAddr\necho \"Configure mongos\"\nmongosh $mongosAddr --eval <<EOF\n  sh.addShard(\"mongodb-shard-0/mongodb-shard0-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\");\n  sh.addShard(\"mongodb-shard-1/mongodb-shard1-data-0.mongodb-headless.mongodb.svc.cluster.local:27017\");\n  sh.enableSharding(\"yorkie-meta\");\n  sh.shardCollection(\n    \"yorkie-meta.clients\", \n    {\n        project_id: 1,\n    }, \n    false\n  );\n  sh.shardCollection(\n    \"yorkie-meta.documents\", \n    {\n        project_id: 1,\n    }, \n    false\n  );\n  sh.shardCollection(\n    \"yorkie-meta.changes\", \n    {\n        doc_id: \"hashed\",\n    }, \n    false\n  );\n  sh.shardCollection(\n    \"yorkie-meta.snapshots\", \n    {\n        doc_id: \"hashed\",\n    }, \n    false\n  );\n  sh.shardCollection(\n    \"yorkie-meta.versionvectors\", \n    {\n        doc_id: \"hashed\",\n    }, \n    false\n  );\nEOF\n"
+kind: ConfigMap
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:/ConfigMap:mongodb/mongodb-setup-script
+  labels:
+    app.kubernetes.io/component: mongodb
+    app.kubernetes.io/part-of: yorkie
+  name: mongodb-setup-script
+  namespace: mongodb
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:rbac.authorization.k8s.io/Role:mongodb/db-provisioning-job-status-reader
+  name: db-provisioning-job-status-reader
+  namespace: mongodb
+rules:
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:rbac.authorization.k8s.io/RoleBinding:mongodb/read-db-provisioning-status
+  name: read-db-provisioning-status
+  namespace: mongodb
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: db-provisioning-job-status-reader
+subjects:
+  - kind: ServiceAccount
+    name: yorkie-db-provisioning-job-account
+    namespace: yorkie
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:/Service:yorkie/yorkie
+    prometheus.io/path: /metrics
+    prometheus.io/port: "8081"
+    prometheus.io/scrape: "true"
+  labels:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/instance: yorkie
+    app.kubernetes.io/managed-by: istio
+    app.kubernetes.io/name: yorkie
+    app.kubernetes.io/part-of: yorkie
+  name: yorkie
+  namespace: yorkie
+spec:
+  ports:
+    - appProtocol: grpc-web
+      name: yorkie-rpc
+      port: 8080
+      targetPort: 8080
+    - appProtocol: http
+      name: yorkie-profiling
+      port: 8081
+      targetPort: 8081
+  selector:
+    app.kubernetes.io/instance: yorkie
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:apps/Deployment:yorkie/yorkie
+  labels:
+    app: yorkie
+    app.kubernetes.io/component: server
+    app.kubernetes.io/instance: yorkie
+    app.kubernetes.io/managed-by: istio
+    app.kubernetes.io/name: yorkie
+    app.kubernetes.io/part-of: yorkie
+    app.kubernetes.io/version: 0.6.23
+    version: 0.6.23
+  name: yorkie
+  namespace: yorkie
+spec:
+  replicas: 3
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: yorkie
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8081"
+        prometheus.io/scrape: "true"
+      labels:
+        app: yorkie
+        app.kubernetes.io/instance: yorkie
+        app.kubernetes.io/version: 0.6.23
+        version: 0.6.23
+    spec:
+      containers:
+        - args:
+            - server
+            - --mongo-connection-uri
+            - mongodb://mongodb.mongodb.svc.cluster.local:27017/yorkie-meta
+            - --mongo-yorkie-database
+            - yorkie-meta
+            - --pprof-enabled
+            - --rpc-port
+            - "8080"
+            - --profiling-port
+            - "8081"
+            - --backend-gateway-addr
+            - yorkie-gateway.yorkie.svc.cluster.local
+            - --backend-use-default-project
+            - "false"
+            - --log-level
+            - info
+          image: yorkieteam/yorkie:0.6.23
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            grpc:
+              port: 8080
+            initialDelaySeconds: 10
+          name: yorkie
+          ports:
+            - containerPort: 8080
+            - containerPort: 8081
+          resources: {}
+      initContainers:
+        - command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Wait db start"
+              while true; do
+                job_status=$(kubectl get job -n $NAMESPACE $JOB_NAME -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}')
+                if [ "$job_status" = "True" ]; then
+                  echo "DB provisioning Job completed successfully!"
+                  break
+                fi
+                echo "Waiting for DB provisioning job to complete..."
+                sleep 5
+              done
+          env:
+            - name: NAMESPACE
+              value: mongodb
+            - name: JOB_NAME
+              value: mongodb-setup-job
+          image: bitnami/kubectl:latest
+          name: wait-for-sharded-db-provision
+          volumeMounts:
+            - mountPath: /root/.kube
+              name: kubeconfig
+              subPath: config
+      serviceAccountName: yorkie-db-provisioning-job-account
+      volumes:
+        - emptyDir: {}
+          name: kubeconfig
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:networking.k8s.io/Ingress:yorkie/yorkie
+  name: yorkie
+  namespace: yorkie
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - backend:
+              service:
+                name: yorkie-gateway
+                port:
+                  number: 80
+            path: /
+            pathType: Prefix
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:networking.istio.io/DestinationRule:yorkie/yorkie
+  name: yorkie
+  namespace: yorkie
+spec:
+  host: yorkie
+  trafficPolicy:
+    loadBalancer:
+      consistentHash:
+        httpHeaderName: x-shard-key
+        maglev:
+          tableSize: 65537
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:networking.istio.io/EnvoyFilter:yorkie/ingress-stream-idle-timeout-filter
+  name: ingress-stream-idle-timeout-filter
+  namespace: yorkie
+spec:
+  configPatches:
+    - applyTo: NETWORK_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+      patch:
+        operation: MERGE
+        value:
+          typed_config:
+            '@type': type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+            stream_idle_timeout: 60s
+  workloadSelector:
+    labels:
+      istio: yorkie-gateway
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:networking.istio.io/EnvoyFilter:yorkie/ingress-shard-key-header-filter
+  name: ingress-shard-key-header-filter
+  namespace: yorkie
+spec:
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+              subFilter:
+                name: envoy.filters.http.router
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.lua
+          typed_config:
+            '@type': type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+            default_source_code:
+              inline_string: |-
+                function envoy_on_request(request_handle) local x_shard_key_header = request_handle:headers():get("x-shard-key") local x_api_key_header = request_handle:headers():get("x-api-key")
+                if x_shard_key_header == nil then if x_api_key_header == nil then request_handle:headers():add("x-shard-key", "default") else request_handle:headers():add("x-shard-key", x_api_key_header) end end end
+  workloadSelector:
+    labels:
+      istio: yorkie-gateway
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:networking.istio.io/Gateway:yorkie/yorkie-gateway
+  name: yorkie-gateway
+  namespace: yorkie
+spec:
+  selector:
+    istio: yorkie-gateway
+  servers:
+    - hosts:
+        - '*'
+      port:
+        name: yorkie-rpc-http
+        number: 80
+        protocol: grpc-web
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:networking.istio.io/VirtualService:yorkie/yorkie
+  name: yorkie
+  namespace: yorkie
+spec:
+  gateways:
+    - yorkie-gateway
+  hosts:
+    - '*'
+  http:
+    - corsPolicy:
+        allowCredentials: true
+        allowHeaders:
+          - grpc-timeout
+          - content-type
+          - keep-alive
+          - user-agent
+          - cache-control
+          - content-transfer-encoding
+          - custom-header-1
+          - x-accept-content-transfer-encoding
+          - x-accept-response-streaming
+          - x-user-agent
+          - x-yorkie-user-agent
+          - x-grpc-web
+          - authorization
+          - x-api-key
+          - x-shard-key
+          - connect-protocol-version
+          - connect-timeout-ms
+        allowMethods:
+          - POST
+          - GET
+          - OPTIONS
+          - PUT
+          - DELETE
+        allowOrigin:
+          - '*'
+        exposeHeaders:
+          - custom-header-1
+          - grpc-status
+          - grpc-message
+          - grpc-status-details-bin
+        maxAge: 1728s
+      match:
+        - uri:
+            prefix: /yorkie.v1
+        - uri:
+            prefix: /auth
+      name: yorkie-rpc-service
+      route:
+        - destination:
+            host: yorkie
+            port:
+              number: 8080
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    argocd.argoproj.io/tracking-id: yorkie-app:batch/Job:mongodb/mongodb-setup-job
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+  labels:
+    app.kubernetes.io/component: mongodb
+    app.kubernetes.io/part-of: yorkie
+  name: mongodb-setup-job
+  namespace: mongodb
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      containers:
+        - command:
+            - /bin/bash
+            - /etc/config/setup.sh
+          image: docker.io/mongo:6.0
+          name: setup
+          volumeMounts:
+            - mountPath: /etc/config
+              name: setup-script
+      restartPolicy: Never
+      volumes:
+        - configMap:
+            name: mongodb-setup-script
+          name: setup-script
