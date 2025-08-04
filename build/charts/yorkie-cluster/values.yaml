@@ -90,5 +90,5 @@ yorkie-mongodb:
     configSize: 500Mi
     storageClass: standard
   sharded:
-    enabled: true
+    enabled: false
   enabled: true
